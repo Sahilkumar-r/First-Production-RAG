@@ -254,8 +254,6 @@ python-multipart==0.0.32
     # via streamlit
 pytz==2026.3.post1
     # via pandas
-pywin32==312
-    # via portalocker
 pyyaml==6.0.3
     # via llama-index-core
 qdrant-client==1.19.0
