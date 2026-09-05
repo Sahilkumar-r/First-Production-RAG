@@ -33,6 +33,18 @@ async def trigger_ingest(data: dict = Body(...)):
     )
     return {"status": "success", "message": "Ingestion event triggered"}
 
+@app.post("/api/trigger-query")
+async def api_trigger_query(data: dict = Body(...)):
+    question = data.get("question")
+    top_k = data.get("top_k", 5)
+    
+    event_ids = await inngest_client.send(
+        inngest.Event(
+            name="rag/query_pdf_ai",
+            data={"question": question, "top_k": top_k}
+        )
+    )
+    return {"status": "success", "event_id": event_ids[0] if event_ids else None}
 
 # 2. Production-Ready Inngest Client
 inngest_client = inngest.Inngest(
