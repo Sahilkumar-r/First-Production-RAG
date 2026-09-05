@@ -1,121 +1,20 @@
-import logging
 import os
-import uuid
-import datetime
-import inngest
-import inngest.fast_api
-from dotenv import load_dotenv
-from groq import Groq 
-from fastapi import FastAPI, Body, UploadFile, File
-from data_loader import load_and_chunk_pdf, embed_texts
-from vector_db import QdrantStorage
-from custom_types import RAQQueryResult, RAGSearchResult, RAGUpsertResult, RAGChunkAndSrc
 from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, Body, HTTPException
+import inngest
+from groq import Groq
+from data_loader import embed_texts  # Assumes embed_texts is defined here or imported correctly
+from vector_db import QdrantStorage
 
+app = FastAPI(title="Production RAG Backend")
 
-load_dotenv()
-
-# 2. Production-Ready Inngest Client
+# Initialize Inngest client
 inngest_client = inngest.Inngest(
-    app_id="rag_app",
-    logger=logging.getLogger("uvicorn"),
-    # This automatically secures the app on Render, but stays open locally when INNGEST_DEV=1
-    is_production=os.getenv("INNGEST_DEV") is None, 
-    serializer=inngest.PydanticSerializer()
+    app_id="first_production_rag",
+    is_production=True,
+    event_key=os.getenv("INNGEST_EVENT_KEY"),
 )
 
-@inngest_client.create_function(
-    fn_id="RAG: Ingest PDF",
-    trigger=inngest.TriggerEvent(event="rag/ingest_pdf"),
-    throttle=inngest.Throttle(
-        limit=2, period=datetime.timedelta(minutes=1)
-    ),
-    rate_limit=inngest.RateLimit(
-        limit=1,
-        period=datetime.timedelta(hours=4),
-        key="event.data.source_id",
-    ),
-)
-async def rag_ingest_pdf(ctx: inngest.Context):
-    def _load(ctx: inngest.Context) -> RAGChunkAndSrc:
-        pdf_path = ctx.event.data["pdf_path"]
-        source_id = ctx.event.data.get("source_id", pdf_path)
-        chunks = load_and_chunk_pdf(pdf_path)
-        return RAGChunkAndSrc(chunks=chunks, source_id=source_id)
-
-    def _upsert(chunks_and_src: RAGChunkAndSrc) -> RAGUpsertResult:
-        chunks = chunks_and_src.chunks
-        source_id = chunks_and_src.source_id
-        vecs = embed_texts(chunks)
-        ids = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_id}:{i}")) for i in range(len(chunks))]
-        payloads = [{"source": source_id, "text": chunks[i]} for i in range(len(chunks))]
-        QdrantStorage(
-            url=os.getenv("QDRANT_URL"), 
-            api_key=os.getenv("QDRANT_API_KEY")
-        ).upsert(ids, vecs, payloads)
-        return RAGUpsertResult(ingested=len(chunks))
-
-    chunks_and_src = await ctx.step.run("load-and-chunk", lambda: _load(ctx), output_type=RAGChunkAndSrc)
-    ingested = await ctx.step.run("embed-and-upsert", lambda: _upsert(chunks_and_src), output_type=RAGUpsertResult)
-    
-    return ingested.model_dump()
-
-
-@inngest_client.create_function(
-    fn_id="RAG: Query PDF",
-    trigger=inngest.TriggerEvent(event="rag/query_pdf_ai")
-)
-async def rag_query_pdf_ai(ctx: inngest.Context):
-    def _search(question: str, top_k: int = 5) -> RAGSearchResult:
-        query_vec = embed_texts([question])[0]
-        store = QdrantStorage(
-            url=os.getenv("QDRANT_URL"), 
-            api_key=os.getenv("QDRANT_API_KEY")
-        )
-        found = store.search(query_vec, top_k)
-        return RAGSearchResult(contexts=found["contexts"], sources=found["sources"])
-
-    # Extract the AI generation into its own reliable step
-    def _generate_answer(context_block: str, question: str) -> str:
-        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        user_content = (
-            "Use the following context to answer the question.\n\n"
-            f"Context:\n{context_block}\n\n"
-            f"Question: {question}\n"
-            "Answer concisely using the context above."
-        )
-        
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-20b", # Free, fast Groq model
-            messages=[
-                {"role": "system", "content": "You answer questions using only the provided context."},
-                {"role": "user", "content": user_content}
-            ],
-            temperature=0.2,
-            max_tokens=1024,
-        )
-        return response.choices[0].message.content.strip()
-
-    question = ctx.event.data["question"]
-    top_k = int(ctx.event.data.get("top_k", 5))
-
-    # 1. Search the Vector Database
-    found = await ctx.step.run("embed-and-search", lambda: _search(question, top_k), output_type=RAGSearchResult)
-
-    # 2. Format Context
-    context_block = "\n\n".join(f"- {c}" for c in found.contexts)
-
-    # 3. Generate Answer via Groq (Wrapped in a step for automatic retries)
-    answer = await ctx.step.run("generate-llm-answer", lambda: _generate_answer(context_block, question))
-
-    return {"answer": answer, "sources": found.sources, "num_contexts": len(found.contexts)}
-
-# Initialize FastAPI and Inngest API route
-app = FastAPI()
-inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf, rag_query_pdf_ai])
-
-
-# 4. Place your custom triggers last
 @app.post("/api/trigger-ingest")
 async def api_trigger_ingest(file: UploadFile = File(...)):
     uploads_dir = Path("uploads")
@@ -133,32 +32,42 @@ async def api_trigger_ingest(file: UploadFile = File(...)):
     )
     return {"status": "success", "event_id": event_ids[0] if event_ids else None}
 
-
 @app.post("/api/query")
 async def api_query(data: dict = Body(...)):
     question = data.get("question")
     top_k = data.get("top_k", 5)
     
-    # 1. Convert the text question into an embedding vector first
+    if not question:
+        raise HTTPException(status_code=400, detail="Question is required")
+        
+    # 1. Convert question to vector embedding
     query_vector = embed_texts([question])[0]
     
-    # 2. Initialize Qdrant storage
+    # 2. Search Qdrant storage
     storage = QdrantStorage(
         url=os.getenv("QDRANT_URL"),
         api_key=os.getenv("QDRANT_API_KEY")
     )
-    
-    # 3. Pass the vector (or call your search method with the vector)
     search_results = storage.search(query_vector, top_k=top_k)
     
-    context_text = "\n\n".join([r.get("text", "") for r in search_results])
+    # 3. Safely format context text whether results are dicts, objects, or strings
+    context_chunks = []
+    for r in search_results:
+        if isinstance(r, dict):
+            context_chunks.append(r.get("text", ""))
+        elif hasattr(r, "text"):
+            context_chunks.append(r.text)
+        else:
+            context_chunks.append(str(r))
+            
+    context_text = "\n\n".join(context_chunks)
     
-    # 4. Generate answer with Groq
+    # 4. Generate answer using Groq LLM
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     completion = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
-            {"role": "system", "content": "Answer the question based on the provided context."},
+            {"role": "system", "content": "Answer the question based strictly on the provided context."},
             {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {question}"}
         ]
     )
