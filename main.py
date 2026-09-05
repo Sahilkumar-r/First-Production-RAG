@@ -65,7 +65,7 @@ async def api_query(data: dict = Body(...)):
     # 4. Generate answer using Groq LLM
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         messages=[
             {"role": "system", "content": "Answer the question based strictly on the provided context."},
             {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {question}"}
