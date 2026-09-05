@@ -139,11 +139,13 @@ async def api_query(data: dict = Body(...)):
     question = data.get("question")
     top_k = data.get("top_k", 5)
     
-    # Run your retrieval and LLM generation directly here
-    storage = QdrantStorage()
+    # Pass the required url and api_key from your environment variables
+    storage = QdrantStorage(
+        url=os.getenv("QDRANT_URL"),
+        api_key=os.getenv("QDRANT_API_KEY")
+    )
     search_results = storage.search(question, top_k=top_k)
     
-    # Build context and call Groq/LLM
     context_text = "\n\n".join([r.get("text", "") for r in search_results])
     
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
