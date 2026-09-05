@@ -18,20 +18,18 @@ from custom_types import RAQQueryResult, RAGSearchResult, RAGUpsertResult, RAGCh
 # 1. Load the environment variables from .env
 load_dotenv()
 
-
 @app.post("/api/trigger-ingest")
-async def trigger_ingest(data: dict = Body(...)):
+async def api_trigger_ingest(data: dict = Body(...)):
     pdf_path = data.get("pdf_path")
     source_id = data.get("source_id", pdf_path)
     
-    # Send the event securely from the backend server
-    await inngest_client.send(
+    event_ids = await inngest_client.send(
         inngest.Event(
             name="rag/ingest_pdf",
             data={"pdf_path": pdf_path, "source_id": source_id}
         )
     )
-    return {"status": "success", "message": "Ingestion event triggered"}
+    return {"status": "success", "event_id": event_ids[0] if event_ids else None}
 
 @app.post("/api/trigger-query")
 async def api_trigger_query(data: dict = Body(...)):
