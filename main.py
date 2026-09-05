@@ -118,12 +118,19 @@ inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf, rag_query_pdf_ai])
 # 4. Place your custom triggers last
 @app.post("/api/trigger-ingest")
 async def api_trigger_ingest(data: dict = Body(...)):
-    pdf_path = data.get("pdf_path")
-    source_id = data.get("source_id", pdf_path)
+    async def api_trigger_ingest(file: UploadFile = File(...)):
+    uploads_dir = Path("uploads")
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    file_path = uploads_dir / file.filename
+    
+    # Save the file received from your computer via Streamlit
+    with open(file_path, "wb") as buffer:
+        buffer.write(await file.read())
+        
     event_ids = await inngest_client.send(
         inngest.Event(
             name="rag/ingest_pdf",
-            data={"pdf_path": pdf_path, "source_id": source_id}
+            data={"pdf_path": str(file_path.resolve()), "source_id": file.filename}
         )
     )
     return {"status": "success", "event_id": event_ids[0] if event_ids else None}
