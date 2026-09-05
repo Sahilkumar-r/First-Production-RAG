@@ -1,21 +1,74 @@
+import logging
 import os
+import uuid
+import datetime
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Body, HTTPException
 import inngest
 import inngest.fast_api
-from groq import Groq
-from data_loader import embed_texts  # Assumes embed_texts is defined here or imported correctly[cite: 1]
-from vector_db import QdrantStorage
+from dotenv import load_dotenv
 
+from groq import Groq 
+
+from data_loader import load_and_chunk_pdf, embed_texts
+from vector_db import QdrantStorage
+from custom_types import RAQQueryResult, RAGSearchResult, RAGUpsertResult, RAGChunkAndSrc
+
+# 1. Load the environment variables from .env
+load_dotenv()
+
+# Initialize FastAPI app
 app = FastAPI(title="Production RAG Backend")
 
-# Initialize Inngest client[cite: 1]
+# 2. Production-Ready Inngest Client
 inngest_client = inngest.Inngest(
-    app_id="first_production_rag",
-    is_production=True,
-    event_key=os.getenv("INNGEST_EVENT_KEY"),
+    app_id="rag_app",
+    logger=logging.getLogger("uvicorn"),
+    is_production=os.getenv("INNGEST_DEV") is None, 
+    serializer=inngest.PydanticSerializer()
 )
 
+# --- INNGEST BACKGROUND INGESTION (Your original working logic) ---
+@inngest_client.create_function(
+    fn_id="RAG: Ingest PDF",
+    trigger=inngest.TriggerEvent(event="rag/ingest_pdf"),
+    throttle=inngest.Throttle(
+        limit=2, period=datetime.timedelta(minutes=1)
+    ),
+    rate_limit=inngest.RateLimit(
+        limit=1,
+        period=datetime.timedelta(hours=4),
+        key="event.data.source_id",
+    ),
+)
+async def rag_ingest_pdf(ctx: inngest.Context):
+    def _load(ctx: inngest.Context) -> RAGChunkAndSrc:
+        pdf_path = ctx.event.data["pdf_path"]
+        source_id = ctx.event.data.get("source_id", Path(pdf_path).name)
+        chunks = load_and_chunk_pdf(pdf_path)
+        return RAGChunkAndSrc(chunks=chunks, source_id=source_id)
+
+    def _upsert(chunks_and_src: RAGChunkAndSrc) -> RAGUpsertResult:
+        chunks = chunks_and_src.chunks
+        source_id = chunks_and_src.source_id
+        vecs = embed_texts(chunks)
+        ids = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_id}:{i}")) for i in range(len(chunks))]
+        payloads = [{"source": source_id, "text": chunks[i]} for i in range(len(chunks))]
+        
+        store = QdrantStorage(
+            url=os.getenv("QDRANT_URL"), 
+            api_key=os.getenv("QDRANT_API_KEY")
+        )
+        store.upsert(ids, vecs, payloads)
+        return RAGUpsertResult(ingested=len(chunks))
+
+    chunks_and_src = await ctx.step.run("load-and-chunk", lambda: _load(ctx), output_type=RAGChunkAndSrc)
+    ingested = await ctx.step.run("embed-and-upsert", lambda: _upsert(chunks_and_src), output_type=RAGUpsertResult)
+    
+    return ingested.model_dump()
+
+
+# --- FASTAPI ENDPOINT: RECEIVE FILE & TRIGGER INNGEST ---
 @app.post("/api/trigger-ingest")
 async def api_trigger_ingest(file: UploadFile = File(...)):
     uploads_dir = Path("uploads")
@@ -33,85 +86,53 @@ async def api_trigger_ingest(file: UploadFile = File(...)):
     )
     return {"status": "success", "event_id": event_ids[0] if event_ids else None}
 
-@inngest_client.create_function(
-    fn_id="ingest-pdf-background",
-    trigger=inngest.TriggerEvent(event="rag/ingest_pdf"),
-)
-async def ingest_pdf_background(ctx: inngest.Context, step: inngest.Step):
-    data = ctx.event.data
-    pdf_path = data.get("pdf_path")
-    source_id = data.get("source_id")
-    
-    def process_pdf():
-        from data_loader import load_pdf_chunks, embed_texts
-        from vector_db import QdrantStorage
-        
-        chunks = load_pdf_chunks(pdf_path)
-        if not chunks:
-            return 0
-            
-        texts = [chunk.get("text") if isinstance(chunk, dict) else str(chunk) for chunk in chunks]
-        embeddings = embed_texts(texts)
-        
-        storage = QdrantStorage(
-            url=os.getenv("QDRANT_URL"),
-            api_key=os.getenv("QDRANT_API_KEY")
-        )
-        storage.upsert(
-            texts=texts,
-            embeddings=embeddings,
-            source_id=source_id
-        )
-        return len(texts)
 
-    chunk_count = await step.run("process-and-store-pdf", process_pdf)
-    return {"status": "processed", "source": source_id, "chunks_indexed": chunk_count}
-
+# --- FASTAPI ENDPOINT: SYNCHRONOUS QUERY (Fixes Streamlit Timeouts) ---
 @app.post("/api/query")
 async def api_query(data: dict = Body(...)):
     question = data.get("question")
-    top_k = data.get("top_k", 5)
+    top_k = int(data.get("top_k", 5))
     
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
-        
-    # 1. Convert question to vector embedding[cite: 1]
-    query_vector = embed_texts([question])[0]
-    
-    # 2. Search Qdrant storage[cite: 1]
-    storage = QdrantStorage(
-        url=os.getenv("QDRANT_URL"),
+
+    # 1. Search the Vector Database
+    query_vec = embed_texts([question])[0]
+    store = QdrantStorage(
+        url=os.getenv("QDRANT_URL"), 
         api_key=os.getenv("QDRANT_API_KEY")
     )
-    search_results = storage.search(query_vector, top_k=top_k)
+    found = store.search(query_vec, top_k)
     
-    # 3. Safely format context text whether results are dicts, objects, or strings[cite: 1]
-    context_chunks = []
-    for r in search_results:
-        if isinstance(r, dict):
-            context_chunks.append(r.get("text", ""))
-        elif hasattr(r, "text"):
-            context_chunks.append(r.text)
-        else:
-            context_chunks.append(str(r))
-            
-    context_text = "\n\n".join(context_chunks)
+    # Extract contexts and sources based on your Qdrant return structure
+    contexts = found.get("contexts", [])
+    sources = found.get("sources", [])
     
-    # 4. Generate answer using Groq LLM[cite: 1]
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[
-            {"role": "system", "content": "Answer the question based strictly on the provided context."},
-            {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {question}"}
-        ]
-    )
-    answer = completion.choices[0].message.content
-    return {"status": "success", "answer": answer, "sources": search_results}
+    # 2. Format Context
+    context_block = "\n\n".join(f"- {c}" for c in contexts)
 
-# Expose Inngest serve endpoint so Inngest Cloud can trigger background tasks
-inngest.fast_api.serve(
-    app,
-    inngest_client,
-    [ingest_pdf_background],
-)
+    # 3. Generate Answer via Groq
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    user_content = (
+        "Use the following context to answer the question.\n\n"
+        f"Context:\n{context_block}\n\n"
+        f"Question: {question}\n"
+        "Answer concisely using the context above."
+    )
+    
+    completion = client.chat.completions.create(
+        model="openai/gpt-oss-20b", 
+        messages=[
+            {"role": "system", "content": "You answer questions using only the provided context."},
+            {"role": "user", "content": user_content}
+        ],
+        temperature=0.2,
+        max_tokens=1024,
+    )
+    answer = completion.choices[0].message.content.strip()
+
+    return {"answer": answer, "sources": sources, "num_contexts": len(contexts)}
+
+
+# --- REGISTER INNGEST ROUTES ---
+inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf])
