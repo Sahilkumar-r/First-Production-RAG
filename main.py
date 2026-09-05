@@ -139,15 +139,21 @@ async def api_query(data: dict = Body(...)):
     question = data.get("question")
     top_k = data.get("top_k", 5)
     
-    # Pass the required url and api_key from your environment variables
+    # 1. Convert the text question into an embedding vector first
+    query_vector = embed_texts([question])[0]
+    
+    # 2. Initialize Qdrant storage
     storage = QdrantStorage(
         url=os.getenv("QDRANT_URL"),
         api_key=os.getenv("QDRANT_API_KEY")
     )
-    search_results = storage.search(question, top_k=top_k)
+    
+    # 3. Pass the vector (or call your search method with the vector)
+    search_results = storage.search(query_vector, top_k=top_k)
     
     context_text = "\n\n".join([r.get("text", "") for r in search_results])
     
+    # 4. Generate answer with Groq
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     completion = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
