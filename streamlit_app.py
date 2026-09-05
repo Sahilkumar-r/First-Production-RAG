@@ -24,14 +24,12 @@ def save_uploaded_pdf(file) -> Path:
     file_path.write_bytes(file_bytes)
     return file_path
 
-def trigger_backend_ingest(pdf_path: Path) -> dict:
-    # Send request to Render backend to execute event safely server-side
+def trigger_backend_ingest(uploaded_file) -> dict:
+    # Package the file from your computer into an HTTP request
+    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
     resp = requests.post(
         f"{BACKEND_URL}/api/trigger-ingest",
-        json={
-            "pdf_path": str(pdf_path.resolve()),
-            "source_id": pdf_path.name,
-        },
+        files=files,
         timeout=30
     )
     resp.raise_for_status()
@@ -40,12 +38,12 @@ def trigger_backend_ingest(pdf_path: Path) -> dict:
 st.title("Upload a PDF to Ingest")
 uploaded = st.file_uploader("Choose a PDF", type=["pdf"], accept_multiple_files=False)
 
+# In your file uploader section:
 if uploaded is not None:
-    with st.spinner("Uploading and triggering ingestion via Render backend..."):
-        path = save_uploaded_pdf(uploaded)
+    with st.spinner("Uploading file from your computer to Render backend..."):
         try:
-            trigger_backend_ingest(path)
-            st.success(f"Successfully triggered ingestion for: {path.name}")
+            trigger_backend_ingest(uploaded)
+            st.success(f"Successfully uploaded and triggered ingestion for: {uploaded.name}")
         except Exception as e:
             st.error(f"Failed to trigger ingestion: {e}")
     st.caption("You can upload another PDF if you like.")
