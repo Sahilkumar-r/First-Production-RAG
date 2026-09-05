@@ -6,6 +6,7 @@ from fastapi import FastAPI
 import inngest
 import inngest.fast_api
 from dotenv import load_dotenv
+from fastapi import Body
 
 # Import Groq for free, lightning-fast inference
 from groq import Groq 
@@ -16,6 +17,22 @@ from custom_types import RAQQueryResult, RAGSearchResult, RAGUpsertResult, RAGCh
 
 # 1. Load the environment variables from .env
 load_dotenv()
+
+
+@app.post("/api/trigger-ingest")
+async def trigger_ingest(data: dict = Body(...)):
+    pdf_path = data.get("pdf_path")
+    source_id = data.get("source_id", pdf_path)
+    
+    # Send the event securely from the backend server
+    await inngest_client.send(
+        inngest.Event(
+            name="rag/ingest_pdf",
+            data={"pdf_path": pdf_path, "source_id": source_id}
+        )
+    )
+    return {"status": "success", "message": "Ingestion event triggered"}
+
 
 # 2. Production-Ready Inngest Client
 inngest_client = inngest.Inngest(
