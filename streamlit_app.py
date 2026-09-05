@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 import time
 import streamlit as st
@@ -16,14 +15,6 @@ def get_backend_url() -> str:
 
 BACKEND_URL = get_backend_url()
 
-def save_uploaded_pdf(file) -> Path:
-    uploads_dir = Path("uploads")
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    file_path = uploads_dir / file.name
-    file_bytes = file.getbuffer()
-    file_path.write_bytes(file_bytes)
-    return file_path
-
 def trigger_backend_ingest(uploaded_file) -> dict:
     # Package the file from your computer into an HTTP request
     files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
@@ -35,10 +26,19 @@ def trigger_backend_ingest(uploaded_file) -> dict:
     resp.raise_for_status()
     return resp.json()
 
+def query_backend(question: str, top_k: int = 5) -> dict:
+    resp = requests.post(
+        f"{BACKEND_URL}/api/query",
+        json={"question": question, "top_k": top_k},
+        timeout=60
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+# --- UI: PDF Ingestion Section ---
 st.title("Upload a PDF to Ingest")
 uploaded = st.file_uploader("Choose a PDF", type=["pdf"], accept_multiple_files=False)
 
-# In your file uploader section:
 if uploaded is not None:
     with st.spinner("Uploading file from your computer to Render backend..."):
         try:
@@ -49,58 +49,9 @@ if uploaded is not None:
     st.caption("You can upload another PDF if you like.")
 
 st.divider()
+
+# --- UI: RAG Query Section ---
 st.title("Ask a question about your PDFs")
-
-def query_backend(question: str, top_k: int = 5) -> dict:
-    resp = requests.post(
-        f"{BACKEND_URL}/api/query",
-        json={"question": question, "top_k": top_k},
-        timeout=60
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-# In your Streamlit UI query section:
-if st.button("Ask"):
-    if user_question:
-        with st.spinner("Generating answer..."):
-            try:
-                result = query_backend(user_question, top_k=top_k)
-                st.write("### Answer")
-                st.write(result.get("answer"))
-            except Exception as e:
-                st.error(f"Error processing query: {e}")
-
-def fetch_runs(event_id: str) -> list[dict]:
-    # In production, poll Inngest Cloud API or route through backend if preferred. 
-    # Here we query Inngest Cloud Event API directly since the frontend has an event key.
-    event_key = st.secrets.get("INNGEST_EVENT_KEY", os.getenv("INNGEST_EVENT_KEY", ""))
-    headers = {"Authorization": f"Bearer {event_key}"} if event_key else {}
-    
-    # Inngest Cloud API endpoint for run tracking
-    url = f"https://api.inngest.com/v1/events/{event_id}/runs"
-    resp = requests.get(url, headers=headers)
-    if resp.status_code != 200:
-        return []
-    data = resp.json()
-    return data.get("data", [])
-
-def wait_for_run_output(event_id: str, timeout_s: float = 120.0, poll_interval_s: float = 1.0) -> dict:
-    start = time.time()
-    last_status = None
-    while True:
-        runs = fetch_runs(event_id)
-        if runs:
-            run = runs[0]
-            status = run.get("status")
-            last_status = status or last_status
-            if status in ("Completed", "Succeeded", "Success", "Finished"):
-                return run.get("output") or {}
-            if status in ("Failed", "Cancelled"):
-                raise RuntimeError(f"Function run {status}")
-        if time.time() - start > timeout_s:
-            raise TimeoutError(f"Timed out waiting for run output (last status: {last_status})")
-        time.sleep(poll_interval_s)
 
 with st.form("rag_query_form"):
     question = st.text_input("Your question")
@@ -109,17 +60,20 @@ with st.form("rag_query_form"):
 
     if submitted and question.strip():
         try:
-            with st.spinner("Dispatching query to backend and generating response..."):
-                event_id = trigger_backend_query(question.strip(), int(top_k))
-                output = wait_for_run_output(event_id)
-                answer = output.get("answer", "")
-                sources = output.get("sources", [])
+            with st.spinner("Generating answer..."):
+                result = query_backend(question.strip(), int(top_k))
+                answer = result.get("answer", "")
+                sources = result.get("sources", [])
 
             st.subheader("Answer")
             st.write(answer or "(No answer)")
+            
             if sources:
                 st.caption("Sources")
                 for s in sources:
-                    st.write(f"- {s}")
+                    # Adjust depending on how your backend structure returns sources
+                    source_name = s.get("source_id", "Unknown source") if isinstance(s, dict) else s
+                    st.write(f"- {source_name}")
+                    
         except Exception as e:
             st.error(f"Error processing query: {e}")
