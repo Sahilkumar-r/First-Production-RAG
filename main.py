@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Body, HTTPException
 import inngest
-import inngest.fastapi
+import inngest.fast_api
 from groq import Groq
 from data_loader import embed_texts  # Assumes embed_texts is defined here or imported correctly[cite: 1]
 from vector_db import QdrantStorage
@@ -110,7 +110,7 @@ async def api_query(data: dict = Body(...)):
     return {"status": "success", "answer": answer, "sources": search_results}
 
 # Expose Inngest serve endpoint so Inngest Cloud can trigger background tasks
-inngest.fastapi.serve(
+inngest.fast_api.serve(
     app,
     inngest_client,
     [ingest_pdf_background],
