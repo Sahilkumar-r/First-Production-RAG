@@ -51,18 +51,25 @@ if uploaded is not None:
 st.divider()
 st.title("Ask a question about your PDFs")
 
-def trigger_backend_query(question: str, top_k: int) -> str:
+def query_backend(question: str, top_k: int = 5) -> dict:
     resp = requests.post(
-        f"{BACKEND_URL}/api/trigger-query",
-        json={
-            "question": question,
-            "top_k": top_k,
-        },
-        timeout=30
+        f"{BACKEND_URL}/api/query",
+        json={"question": question, "top_k": top_k},
+        timeout=60
     )
     resp.raise_for_status()
-    data = resp.json()
-    return data.get("event_id")
+    return resp.json()
+
+# In your Streamlit UI query section:
+if st.button("Ask"):
+    if user_question:
+        with st.spinner("Generating answer..."):
+            try:
+                result = query_backend(user_question, top_k=top_k)
+                st.write("### Answer")
+                st.write(result.get("answer"))
+            except Exception as e:
+                st.error(f"Error processing query: {e}")
 
 def fetch_runs(event_id: str) -> list[dict]:
     # In production, poll Inngest Cloud API or route through backend if preferred. 
