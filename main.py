@@ -2,52 +2,18 @@ import logging
 import os
 import uuid
 import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 import inngest
 import inngest.fast_api
 from dotenv import load_dotenv
-from fastapi import Body
-
-# Import Groq for free, lightning-fast inference
 from groq import Groq 
 
 from data_loader import load_and_chunk_pdf, embed_texts
 from vector_db import QdrantStorage
 from custom_types import RAQQueryResult, RAGSearchResult, RAGUpsertResult, RAGChunkAndSrc
 
-# 1. Load the environment variables from .env
+
 load_dotenv()
-
-# Initialize FastAPI and Inngest API route FIRST
-app = FastAPI()
-inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf, rag_query_pdf_ai])
-
-# Place your custom routes AFTER app is initialized
-@app.post("/api/trigger-ingest")
-async def api_trigger_ingest(data: dict = Body(...)):
-    pdf_path = data.get("pdf_path")
-    source_id = data.get("source_id", pdf_path)
-    
-    event_ids = await inngest_client.send(
-        inngest.Event(
-            name="rag/ingest_pdf",
-            data={"pdf_path": pdf_path, "source_id": source_id}
-        )
-    )
-    return {"status": "success", "event_id": event_ids[0] if event_ids else None}
-
-@app.post("/api/trigger-query")
-async def api_trigger_query(data: dict = Body(...)):
-    question = data.get("question")
-    top_k = data.get("top_k", 5)
-    
-    event_ids = await inngest_client.send(
-        inngest.Event(
-            name="rag/query_pdf_ai",
-            data={"question": question, "top_k": top_k}
-        )
-    )
-    return {"status": "success", "event_id": event_ids[0] if event_ids else None}
 
 # 2. Production-Ready Inngest Client
 inngest_client = inngest.Inngest(
@@ -147,3 +113,29 @@ async def rag_query_pdf_ai(ctx: inngest.Context):
 # Initialize FastAPI and Inngest API route
 app = FastAPI()
 inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf, rag_query_pdf_ai])
+
+
+# 4. Place your custom triggers last
+@app.post("/api/trigger-ingest")
+async def api_trigger_ingest(data: dict = Body(...)):
+    pdf_path = data.get("pdf_path")
+    source_id = data.get("source_id", pdf_path)
+    event_ids = await inngest_client.send(
+        inngest.Event(
+            name="rag/ingest_pdf",
+            data={"pdf_path": pdf_path, "source_id": source_id}
+        )
+    )
+    return {"status": "success", "event_id": event_ids[0] if event_ids else None}
+
+@app.post("/api/trigger-query")
+async def api_trigger_query(data: dict = Body(...)):
+    question = data.get("question")
+    top_k = data.get("top_k", 5)
+    event_ids = await inngest_client.send(
+        inngest.Event(
+            name="rag/query_pdf_ai",
+            data={"question": question, "top_k": top_k}
+        )
+    )
+    return {"status": "success", "event_id": event_ids[0] if event_ids else None}
