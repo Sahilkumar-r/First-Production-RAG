@@ -133,14 +133,26 @@ async def api_trigger_ingest(file: UploadFile = File(...)):
     )
     return {"status": "success", "event_id": event_ids[0] if event_ids else None}
 
-@app.post("/api/trigger-query")
-async def api_trigger_query(data: dict = Body(...)):
+
+@app.post("/api/query")
+async def api_query(data: dict = Body(...)):
     question = data.get("question")
     top_k = data.get("top_k", 5)
-    event_ids = await inngest_client.send(
-        inngest.Event(
-            name="rag/query_pdf_ai",
-            data={"question": question, "top_k": top_k}
-        )
+    
+    # Run your retrieval and LLM generation directly here
+    storage = QdrantStorage()
+    search_results = storage.search(question, top_k=top_k)
+    
+    # Build context and call Groq/LLM
+    context_text = "\n\n".join([r.get("text", "") for r in search_results])
+    
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    completion = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "Answer the question based on the provided context."},
+            {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {question}"}
+        ]
     )
-    return {"status": "success", "event_id": event_ids[0] if event_ids else None}
+    answer = completion.choices[0].message.content
+    return {"status": "success", "answer": answer, "sources": search_results}
