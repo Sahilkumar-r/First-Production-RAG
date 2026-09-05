@@ -18,6 +18,11 @@ from custom_types import RAQQueryResult, RAGSearchResult, RAGUpsertResult, RAGCh
 # 1. Load the environment variables from .env
 load_dotenv()
 
+# Initialize FastAPI and Inngest API route FIRST
+app = FastAPI()
+inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf, rag_query_pdf_ai])
+
+# Place your custom routes AFTER app is initialized
 @app.post("/api/trigger-ingest")
 async def api_trigger_ingest(data: dict = Body(...)):
     pdf_path = data.get("pdf_path")
