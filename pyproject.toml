@@ -1,0 +1,19 @@
+[project]
+name = "project-2-production-rag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.141.1",
+    "groq>=1.7.0",
+    "inngest>=0.5.19",
+    "llama-index-core>=0.14.24",
+    "llama-index-embeddings-google-genai>=0.6.0",
+    "llama-index-readers-file>=0.7.0",
+    "openai>=3.8.0",
+    "python-dotenv>=1.2.3",
+    "qdrant-client>=1.19.0",
+    "streamlit>=1.63.0",
+    "uvicorn>=0.52.4",
+]

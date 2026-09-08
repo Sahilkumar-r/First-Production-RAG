@@ -1,57 +1,107 @@
+import asyncio
 from pathlib import Path
 import time
+
 import streamlit as st
+import inngest
+from dotenv import load_dotenv
 import os
 import requests
 
-st.set_page_config(page_title="Production RAG Pipeline", page_icon="📄", layout="centered")
+load_dotenv()
 
-# Get backend URL from Streamlit secrets or environment variables, falling back to Render URL
-def get_backend_url() -> str:
-    try:
-        return st.secrets.get("BACKEND_URL", "https://first-production-rag.onrender.com").rstrip("/")
-    except Exception:
-        return os.getenv("BACKEND_URL", "https://first-production-rag.onrender.com").rstrip("/")
+st.set_page_config(page_title="RAG Ingest PDF", page_icon="📄", layout="centered")
 
-BACKEND_URL = get_backend_url()
 
-def trigger_backend_ingest(uploaded_file) -> dict:
-    # Package the file from your computer into an HTTP request
-    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-    resp = requests.post(
-        f"{BACKEND_URL}/api/trigger-ingest",
-        files=files,
-        timeout=30
+@st.cache_resource
+def get_inngest_client() -> inngest.Inngest:
+    return inngest.Inngest(app_id="rag_app", is_production=False)
+
+
+def save_uploaded_pdf(file) -> Path:
+    uploads_dir = Path("uploads")
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    file_path = uploads_dir / file.name
+    file_bytes = file.getbuffer()
+    file_path.write_bytes(file_bytes)
+    return file_path
+
+
+async def send_rag_ingest_event(pdf_path: Path) -> None:
+    client = get_inngest_client()
+    await client.send(
+        inngest.Event(
+            name="rag/ingest_pdf",
+            data={
+                "pdf_path": str(pdf_path.resolve()),
+                "source_id": pdf_path.name,
+            },
+        )
     )
-    resp.raise_for_status()
-    return resp.json()
 
-def query_backend(question: str, top_k: int = 5) -> dict:
-    resp = requests.post(
-        f"{BACKEND_URL}/api/query",
-        json={"question": question, "top_k": top_k},
-        timeout=60
-    )
-    resp.raise_for_status()
-    return resp.json()
 
-# --- UI: PDF Ingestion Section ---
 st.title("Upload a PDF to Ingest")
 uploaded = st.file_uploader("Choose a PDF", type=["pdf"], accept_multiple_files=False)
 
 if uploaded is not None:
-    with st.spinner("Uploading file from your computer to Render backend..."):
-        try:
-            trigger_backend_ingest(uploaded)
-            st.success(f"Successfully uploaded and triggered ingestion for: {uploaded.name}")
-        except Exception as e:
-            st.error(f"Failed to trigger ingestion: {e}")
+    with st.spinner("Uploading and triggering ingestion..."):
+        path = save_uploaded_pdf(uploaded)
+        # Kick off the event and block until the send completes
+        asyncio.run(send_rag_ingest_event(path))
+        # Small pause for user feedback continuity
+        time.sleep(0.3)
+    st.success(f"Triggered ingestion for: {path.name}")
     st.caption("You can upload another PDF if you like.")
 
 st.divider()
-
-# --- UI: RAG Query Section ---
 st.title("Ask a question about your PDFs")
+
+
+async def send_rag_query_event(question: str, top_k: int) -> None:
+    client = get_inngest_client()
+    result = await client.send(
+        inngest.Event(
+            name="rag/query_pdf_ai",
+            data={
+                "question": question,
+                "top_k": top_k,
+            },
+        )
+    )
+
+    return result[0]
+
+
+def _inngest_api_base() -> str:
+    # Local dev server default; configurable via env
+    return os.getenv("INNGEST_API_BASE", "http://127.0.0.1:8288/v1")
+
+
+def fetch_runs(event_id: str) -> list[dict]:
+    url = f"{_inngest_api_base()}/events/{event_id}/runs"
+    resp = requests.get(url)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("data", [])
+
+
+def wait_for_run_output(event_id: str, timeout_s: float = 120.0, poll_interval_s: float = 0.5) -> dict:
+    start = time.time()
+    last_status = None
+    while True:
+        runs = fetch_runs(event_id)
+        if runs:
+            run = runs[0]
+            status = run.get("status")
+            last_status = status or last_status
+            if status in ("Completed", "Succeeded", "Success", "Finished"):
+                return run.get("output") or {}
+            if status in ("Failed", "Cancelled"):
+                raise RuntimeError(f"Function run {status}")
+        if time.time() - start > timeout_s:
+            raise TimeoutError(f"Timed out waiting for run output (last status: {last_status})")
+        time.sleep(poll_interval_s)
+
 
 with st.form("rag_query_form"):
     question = st.text_input("Your question")
@@ -59,21 +109,18 @@ with st.form("rag_query_form"):
     submitted = st.form_submit_button("Ask")
 
     if submitted and question.strip():
-        try:
-            with st.spinner("Generating answer..."):
-                result = query_backend(question.strip(), int(top_k))
-                answer = result.get("answer", "")
-                sources = result.get("sources", [])
+        with st.spinner("Sending event and generating answer..."):
+            # Fire-and-forget event to Inngest for observability/workflow
+            event_id = asyncio.run(send_rag_query_event(question.strip(), int(top_k)))
+            # Poll the local Inngest API for the run's output
+            output = wait_for_run_output(event_id)
+            answer = output.get("answer", "")
+            sources = output.get("sources", [])
 
-            st.subheader("Answer")
-            st.write(answer or "(No answer)")
-            
-            if sources:
-                st.caption("Sources")
-                for s in sources:
-                    # Adjust depending on how your backend structure returns sources
-                    source_name = s.get("source_id", "Unknown source") if isinstance(s, dict) else s
-                    st.write(f"- {source_name}")
-                    
-        except Exception as e:
-            st.error(f"Error processing query: {e}")
+        st.subheader("Answer")
+        st.write(answer or "(No answer)")
+        if sources:
+            st.caption("Sources")
+            for s in sources:
+                st.write(f"- {s}")
+

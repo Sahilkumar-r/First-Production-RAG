@@ -1,0 +1,5 @@
+uv run uvicorn main:app      #running the app in main.py
+npx inngest-cli@latest dev -u http://127.0.0.1:8000/api/inngest --no-discovery
+# connecting the inngest server to client
+
+uv run streamlit run .\file_name
