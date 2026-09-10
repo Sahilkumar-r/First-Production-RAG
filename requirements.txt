@@ -75,6 +75,7 @@ idna==3.11
 imbalanced-learn==0.14.1
 importlib_metadata==8.7.1
 iniconfig==2.3.0
+inngest
 interface_meta==2.0.1
 itsdangerous==2.2.0
 Jinja2==3.1.6
