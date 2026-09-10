@@ -182,7 +182,6 @@ python-http-client==3.3.7
 python-multipart==0.0.26
 python-pptx==1.0.2
 pytz==2025.2
-pywin32==311
 PyYAML==6.0.3
 redis==7.4.0
 referencing==0.37.0
